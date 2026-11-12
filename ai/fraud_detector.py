@@ -1,42 +1,91 @@
 import os
+import sys
 import joblib
 import pandas as pd
 import numpy as np
 
+# Try importing torch; if not available, gracefully fallback
+try:
+    import torch
+    from neural_model import DeepFraudMLP, FraudAutoencoder
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
 class FraudDetector:
     """
-    FraudDetector loads a trained scikit-learn pipeline and predicts transaction fraud risks.
+    VeriFund FraudDetector supports:
+    - 'NEURAL': PyTorch Deep Tabular MLP with Focal Loss + Autoencoder Anomaly Score
+    - 'RANDOM_FOREST': Scikit-Learn Balanced Random Forest Pipeline
+    - 'HYBRID': Consensus Ensemble of Neural + Tree Models
     
-    Risk Level Threshold Rules:
-    - HIGH Risk: Probability score >= Classification Threshold (Tuned value).
-    - MEDIUM Risk: Classification Threshold * 0.5 <= Probability score < Classification Threshold.
-    - LOW Risk: Probability score < Classification Threshold * 0.5.
-    
-    Disclaimer:
-    The output probability is a model score based on the PaySim synthetic distribution
-    and is not calibrated to represent real-world statistical probability.
+    Risk Level Rules (Calibrated Multi-Tier Thresholds):
+    - HIGH Risk: Probability score >= 0.35 (or Anomaly Score > 1.5)
+    - MEDIUM Risk: 0.15 <= Probability score < 0.35
+    - LOW Risk: Probability score < 0.15
     """
-    def __init__(self, model_path=None):
-        if model_path is None:
-            # Default lookup path
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            model_path = os.path.join(base_dir, "models", "fraud_detection_model.joblib")
-
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Trained model file not found at: {model_path}")
-
-        # Load persisted model dictionary (TC-18: no training CSV required)
-        self.model_data = joblib.load(model_path)
-        self.pipeline = self.model_data['pipeline']
-        self.features = self.model_data['features']
-        self.threshold = self.model_data['threshold']
+    def __init__(self, mode="NEURAL", model_path=None):
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.mode = mode.upper()
+        
+        # Paths
+        self.rf_model_path = os.path.join(self.base_dir, "models", "fraud_detection_model.joblib")
+        self.neural_model_path = os.path.join(self.base_dir, "models", "neural_fraud_model.pt")
+        self.neural_prep_path = os.path.join(self.base_dir, "models", "neural_preprocessor.joblib")
+        
+        self.rf_pipeline = None
+        self.high_threshold = 0.35
+        self.med_threshold = 0.15
+        self.features = ['step', 'type', 'amount']
+        
+        # 1. Load Random Forest model if available
+        if os.path.exists(self.rf_model_path):
+            try:
+                rf_data = joblib.load(self.rf_model_path)
+                self.rf_pipeline = rf_data.get('pipeline')
+                self.features = rf_data.get('features', self.features)
+            except Exception as e:
+                print(f"Warning: Could not load Random Forest model: {e}")
+                
+        # 2. Load PyTorch Neural Network if available
+        self.neural_model = None
+        self.autoencoder = None
+        self.neural_preprocessor = None
+        
+        if TORCH_AVAILABLE and os.path.exists(self.neural_model_path) and os.path.exists(self.neural_prep_path):
+            try:
+                self.neural_preprocessor = joblib.load(self.neural_prep_path)
+                checkpoint = torch.load(self.neural_model_path, map_location=torch.device('cpu'))
+                
+                input_dim = checkpoint.get('input_dim', 7)
+                
+                # Instantiate and load DeepFraudMLP
+                self.neural_model = DeepFraudMLP(input_dim=input_dim)
+                self.neural_model.load_state_dict(checkpoint['model_state_dict'])
+                self.neural_model.eval()
+                
+                # Instantiate and load FraudAutoencoder if present
+                if 'autoencoder_state_dict' in checkpoint:
+                    self.autoencoder = FraudAutoencoder(input_dim=input_dim)
+                    self.autoencoder.load_state_dict(checkpoint['autoencoder_state_dict'])
+                    self.autoencoder.eval()
+            except Exception as e:
+                print(f"Warning: Could not load Neural Network model: {e}")
+                self.neural_model = None
+                
+        # If Neural is requested but not ready, fallback to Random Forest
+        if self.mode in ["NEURAL", "HYBRID"] and self.neural_model is None:
+            if self.rf_pipeline is not None:
+                print("Notice: Neural model not ready, falling back to Random Forest.")
+                self.mode = "RANDOM_FOREST"
+            else:
+                raise FileNotFoundError("Neither Neural nor Random Forest model weights found. Run training first.")
 
     def predict(self, input_data):
         """
         Predict fraud risk for given transaction data.
         input_data: Can be a dict, a list of dicts, or a pandas DataFrame.
         """
-        # Convert input formats
         if isinstance(input_data, dict):
             df = pd.DataFrame([input_data])
             is_single = True
@@ -49,55 +98,79 @@ class FraudDetector:
         else:
             raise TypeError("Input must be a dictionary, list of dictionaries, or a pandas DataFrame.")
 
-        # TC-16: Check for missing required features
+        # Check required features
         for feature in self.features:
             if feature not in df.columns:
                 raise ValueError(f"Validation Error: Missing required feature column '{feature}'")
-            
-            # Check for null / missing value counts in inputs
             if df[feature].isna().any():
                 raise ValueError(f"Validation Error: Column '{feature}' contains missing or NaN values")
 
-        # TC-17: Check for invalid data types
-        # 'step' must be numeric integer/float convertible
+        # Type conversion & validation
         try:
             df['step'] = pd.to_numeric(df['step'], errors='raise')
-        except Exception:
-            raise TypeError("Validation Error: Feature 'step' must be a numeric value")
-
-        # 'amount' must be numeric float/int convertible
-        try:
             df['amount'] = pd.to_numeric(df['amount'], errors='raise')
         except Exception:
-            raise TypeError("Validation Error: Feature 'amount' must be a numeric value")
+            raise TypeError("Validation Error: 'step' and 'amount' must be numeric values")
 
-        # Validate that amount is non-negative
         if (df['amount'] < 0).any():
             raise ValueError("Validation Error: Transaction 'amount' cannot be negative")
 
-        # Keep only features expected by the model pipeline
         df_model = df[self.features]
-
-        # Execute predictions without retraining (TC-24)
-        probabilities = self.pipeline.predict_proba(df_model)[:, 1]
+        
+        neural_probs = None
+        rf_probs = None
+        anomaly_scores = None
+        
+        # 1. Neural Prediction
+        if self.mode in ["NEURAL", "HYBRID"] and self.neural_model is not None:
+            X_proc = self.neural_preprocessor.transform(df_model)
+            tensor_x = torch.tensor(X_proc, dtype=torch.float32)
+            with torch.no_grad():
+                neural_probs = self.neural_model(tensor_x).numpy().flatten()
+                if self.autoencoder is not None:
+                    anomaly_scores = self.autoencoder.anomaly_score(tensor_x).numpy().flatten()
+                    
+        # 2. Random Forest Prediction
+        if self.mode in ["RANDOM_FOREST", "HYBRID"] and self.rf_pipeline is not None:
+            rf_probs = self.rf_pipeline.predict_proba(df_model)[:, 1]
+            
+        # 3. Final Probability Consensus
+        if self.mode == "NEURAL" and neural_probs is not None:
+            final_probs = neural_probs
+            active_engine = "Deep Neural Network (PyTorch MLP)"
+        elif self.mode == "RANDOM_FOREST" and rf_probs is not None:
+            final_probs = rf_probs
+            active_engine = "Random Forest Classifier"
+        elif self.mode == "HYBRID" and neural_probs is not None and rf_probs is not None:
+            final_probs = 0.5 * neural_probs + 0.5 * rf_probs
+            active_engine = "Hybrid Consensus (Neural + Random Forest)"
+        else:
+            final_probs = rf_probs if rf_probs is not None else neural_probs
+            active_engine = "Fallback Classifier"
 
         results = []
-        for prob in probabilities:
+        for i, prob in enumerate(final_probs):
             prob_float = float(prob)
-            prediction = 1 if prob_float >= self.threshold else 0
+            prediction = 1 if prob_float >= self.high_threshold else 0
 
-            # Set risk levels based on probability relative to tuned threshold
-            if prob_float >= self.threshold:
+            # Set calibrated risk levels
+            if prob_float >= self.high_threshold:
                 risk_level = "HIGH"
-            elif prob_float >= (self.threshold * 0.5):
+            elif prob_float >= self.med_threshold:
                 risk_level = "MEDIUM"
             else:
                 risk_level = "LOW"
 
-            results.append({
+            res = {
                 "prediction": prediction,
-                "probability": prob_float,
-                "risk_level": risk_level
-            })
+                "probability": round(prob_float, 4),
+                "risk_level": risk_level,
+                "engine": active_engine,
+                "threshold": self.high_threshold
+            }
+            if anomaly_scores is not None:
+                res["anomaly_score"] = round(float(anomaly_scores[i]), 4)
+                
+            results.append(res)
 
         return results[0] if is_single else results

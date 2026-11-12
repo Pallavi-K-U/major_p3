@@ -905,7 +905,7 @@ function App() {
                 Transparent Philanthropy Powered by Smart Contracts & AI
               </h1>
               <p className="hero-subtitle">
-                Guaranteed fund allocation through milestone-based cryptographic escrow on the Ethereum EVM, automated PaySim machine learning fraud risk scoring, and spaCy NLP impact analysis.
+                Guaranteed fund allocation through milestone-based cryptographic escrow on the Ethereum EVM, automated PyTorch Deep Neural Network fraud risk scoring, and spaCy NLP impact analysis.
               </p>
 
               <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
@@ -941,7 +941,7 @@ function App() {
               <div className="stat-card">
                 <span className="stat-label">AI Fraud Protection</span>
                 <span className="stat-value">99.2%</span>
-                <span className="stat-hint">🤖 PaySim ML Engine</span>
+                <span className="stat-hint">🧠 PyTorch Deep MLP</span>
               </div>
               <div className="stat-card">
                 <span className="stat-label">Decentralized Storage</span>
@@ -1144,7 +1144,7 @@ function App() {
                           AI Engine
                         </div>
                         <div style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                          Flask PaySim ML
+                          PyTorch Deep Neural Net
                         </div>
                       </div>
                       <span className="pulse-dot online" />
@@ -2122,7 +2122,7 @@ function App() {
                       <tbody>
                         {adminNgos.map(ngo => (
                           <tr key={ngo._id}>
-                            <td style={{ fontWeight: 600 }}>{ngo.name}</td>
+                            <td style={{ fontWeight: 600 }}>{ngo.name || ngo.organizationName || ngo.userId?.name || 'NGO Entity'}</td>
                             <td style={{ fontFamily: 'JetBrains Mono' }}>{ngo.registrationNumber}</td>
                             <td>
                               <span className={`badge-pill ${ngo.verified ? 'badge-success' : 'badge-warning'}`}>
@@ -2143,13 +2143,13 @@ function App() {
                   </div>
                 </div>
 
-                {/* Global Transaction Audit Ledger with AI PaySim Risk */}
+                {/* Global Transaction Audit Ledger with AI Neural Network Risk */}
                 <div className="premium-card" style={{ marginBottom: '28px' }}>
                   <h3 style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '8px' }}>
-                    🤖 PaySim AI Fraud Risk & Transaction Audit
+                    🧠 Deep Neural Network Fraud Risk & Transaction Audit
                   </h3>
                   <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-                    Automated Random Forest ML risk classification on all contributions.
+                    Automated PyTorch Deep MLP risk scoring with Focal Loss & Zero-Day Anomaly Detection.
                   </p>
 
                   <div className="table-responsive">
